@@ -1,25 +1,37 @@
 const getBestLocator = (element) => {
-  if (!element) return { type: 'xpath', locator: '' };
+  const ranking = getLocatorRanking(element);
+  return ranking.length ? ranking[0] : { type: 'xpath', locator: '' };
+};
 
+const getLocatorRanking = (element) => {
+  if (!element) return [];
+
+  const ranking = [];
   if (element.id) {
-    return { type: 'css', locator: `#${element.id}` };
+    ranking.push({ type: 'css', locator: `#${element.id}`, score: 100 });
   }
   if (element.dataset && element.dataset.testid) {
-    return { type: 'css', locator: `[data-testid="${element.dataset.testid}"]` };
+    ranking.push({ type: 'css', locator: `[data-testid="${element.dataset.testid}"]`, score: 90 });
   }
   if (element.name) {
-    return { type: 'css', locator: `[name="${element.name}"]` };
+    ranking.push({ type: 'css', locator: `[name="${element.name}"]`, score: 75 });
   }
   if (element.getAttribute('aria-label')) {
-    return { type: 'css', locator: `[aria-label="${element.getAttribute('aria-label')}"]` };
+    ranking.push({ type: 'css', locator: `[aria-label="${element.getAttribute('aria-label')}"]`, score: 70 });
   }
 
-  const classes = Array.from(element.classList).filter(Boolean);
-  if (classes.length > 0) {
-    return { type: 'css', locator: `${element.tagName.toLowerCase()}.${classes.join('.')}` };
+  const stableClasses = Array.from(element.classList).filter((name) => name && !isDynamicClass(name));
+  if (stableClasses.length > 0) {
+    ranking.push({ type: 'css', locator: `${element.tagName.toLowerCase()}.${stableClasses.join('.')}`, score: 55 });
   }
 
-  return { type: 'xpath', locator: getPathTo(element) };
+  const allClasses = Array.from(element.classList).filter(Boolean);
+  if (allClasses.length > 0 && stableClasses.length !== allClasses.length) {
+    ranking.push({ type: 'css', locator: `${element.tagName.toLowerCase()}.${allClasses.join('.')}`, score: 40 });
+  }
+
+  ranking.push({ type: 'xpath', locator: getPathTo(element), score: 25 });
+  return ranking;
 };
 
 const getPathTo = (element) => {
@@ -99,15 +111,14 @@ const analyzePage = () => {
     return !hasLabel && !el.getAttribute('aria-label') && !el.placeholder;
   }).length;
   const dynamicClasses = interactive.reduce((count, el) => count + Array.from(el.classList).filter(isDynamicClass).length, 0);
+  const stableSelectors = interactive.filter((el) => el.id || el.dataset.testid || el.name || el.getAttribute('aria-label')).length;
 
-  let score = 100;
-  if (!title) score -= 10;
-  score -= Math.min(30, missingIds * 4);
-  score -= Math.min(20, ariaMissing * 3);
-  score -= Math.min(20, dynamicClasses * 2);
-  score = Math.max(0, Math.min(100, score));
+  const locatorHealth = Math.max(0, 100 - missingIds * 3 - dynamicClasses * 2 - Math.max(0, (interactive.length - stableSelectors) * 1));
+  const accessibility = Math.max(0, 100 - ariaMissing * 4 - (!title ? 10 : 0));
+  const maintainability = Math.max(0, 100 - dynamicClasses * 2 - missingIds * 2);
+  const automationScore = Math.round((locatorHealth + accessibility + maintainability) / 3);
 
-  const grade = score >= 80 ? 'A' : score >= 60 ? 'B' : score >= 40 ? 'C' : 'D';
+  const grade = automationScore >= 80 ? 'A' : automationScore >= 60 ? 'B' : automationScore >= 40 ? 'C' : 'D';
   const suggestions = makeSummary({ title, missingIds, ariaMissing, dynamicClasses });
 
   return {
@@ -123,7 +134,11 @@ const analyzePage = () => {
     missingIds,
     ariaMissing,
     dynamicClasses,
-    score,
+    locatorHealth,
+    accessibility,
+    maintainability,
+    automationScore,
+    score: automationScore,
     grade,
     summary: suggestions.join(' '),
     suggestions,
@@ -162,11 +177,62 @@ const onClick = (event) => {
       tag: element.tagName.toLowerCase(),
       label,
       bestLocator: quality.bestLocator,
+      locatorRanking: getLocatorRanking(element),
       qualityText: quality.qualityText,
       recommendation: quality.recommendation
     }
   });
   removeListeners();
+};
+
+const highlightIssueElements = (issueType) => {
+  const elements = getIssueElements(issueType);
+  const style = getIssueStyle(issueType);
+
+  elements.forEach((el) => {
+    el.dataset.qaforgeIssueHighlight = issueType;
+    el.dataset.qaforgeIssueOutline = el.style.outline || '';
+    el.dataset.qaforgeIssueBg = el.style.backgroundColor || '';
+    el.style.outline = style.outline;
+    el.style.backgroundColor = style.backgroundColor;
+  });
+
+  return elements.length;
+};
+
+const getIssueElements = (issueType) => {
+  if (issueType === 'dynamic-classes') {
+    return Array.from(document.querySelectorAll('*')).filter((el) => Array.from(el.classList || []).some(isDynamicClass));
+  }
+
+  if (issueType === 'missing-labels') {
+    return Array.from(document.querySelectorAll('input, select, textarea')).filter((el) => {
+      const hasLabel = el.id && document.querySelector(`label[for="${el.id}"]`);
+      return !hasLabel && !el.getAttribute('aria-label') && !el.placeholder && !el.getAttribute('type')?.includes('hidden');
+    });
+  }
+
+  return Array.from(document.querySelectorAll('button:not([id]), input:not([id]), select:not([id]), textarea:not([id]), a[href]:not([id])'));
+};
+
+const getIssueStyle = (issueType) => {
+  if (issueType === 'dynamic-classes') {
+    return { outline: '3px dashed #0b4a95', backgroundColor: 'rgba(11, 74, 149, 0.16)' };
+  }
+  if (issueType === 'missing-labels') {
+    return { outline: '3px dashed #d64545', backgroundColor: 'rgba(214, 69, 69, 0.16)' };
+  }
+  return { outline: '3px dashed #ff8c00', backgroundColor: 'rgba(255, 227, 116, 0.25)' };
+};
+
+const clearIssueHighlights = () => {
+  document.querySelectorAll('[data-qaforge-issue-highlight]').forEach((el) => {
+    el.style.outline = el.dataset.qaforgeIssueOutline || '';
+    el.style.backgroundColor = el.dataset.qaforgeIssueBg || '';
+    delete el.dataset.qaforgeIssueHighlight;
+    delete el.dataset.qaforgeIssueOutline;
+    delete el.dataset.qaforgeIssueBg;
+  });
 };
 
 const addListeners = () => {
@@ -183,10 +249,16 @@ const removeListeners = () => {
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.action === 'scanPage') {
+    clearIssueHighlights();
     sendResponse(analyzePage());
   }
   if (message.action === 'activateLocatorMode') {
     addListeners();
     sendResponse({ status: 'locator-mode-enabled' });
+  }
+  if (message.action === 'highlightIssue') {
+    clearIssueHighlights();
+    const count = highlightIssueElements(message.issueType || 'missing-ids');
+    sendResponse({ status: 'highlighted', count, issueType: message.issueType || 'missing-ids' });
   }
 });
